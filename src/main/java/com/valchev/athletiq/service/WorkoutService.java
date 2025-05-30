@@ -12,16 +12,17 @@ import com.valchev.athletiq.domain.mapper.ExerciseMapper;
 import com.valchev.athletiq.domain.mapper.ExerciseSetMapper;
 import com.valchev.athletiq.domain.mapper.WorkoutMapper;
 import com.valchev.athletiq.repository.WorkoutRepository;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Service
+@Slf4j
 public class WorkoutService {
 
     private final WorkoutRepository workoutRepository;
@@ -29,18 +30,16 @@ public class WorkoutService {
     private final ExerciseService exerciseService;
     private final ExerciseMapper exerciseMapper;
     private final ExerciseSetMapper exerciseSetMapper;
-    private final ExerciseSetService exerciseSetService;
 
     @Autowired
     public WorkoutService(WorkoutRepository workoutRepository, WorkoutMapper workoutMapper,
                           ExerciseService exerciseService, ExerciseMapper exerciseMapper,
-                          ExerciseSetMapper exerciseSetMapper, ExerciseSetService exerciseSetService) {
+                          ExerciseSetMapper exerciseSetMapper) {
         this.workoutRepository = workoutRepository;
         this.workoutMapper = workoutMapper;
         this.exerciseService = exerciseService;
         this.exerciseMapper = exerciseMapper;
         this.exerciseSetMapper = exerciseSetMapper;
-        this.exerciseSetService = exerciseSetService;
     }
 
     private static void checkIfExerciseExistsInWorkout(UUID exerciseId, Workout workout) {
@@ -50,11 +49,6 @@ public class WorkoutService {
         if (!exerciseExists) {
             throw new ResourceNotFoundException("Exercise not found in workout");
         }
-    }
-
-    public List<WorkoutDTO> findAll() {
-        List<Workout> workouts = workoutRepository.findAll();
-        return workoutMapper.toDTOs(workouts);
     }
 
     public Optional<WorkoutDTO> findById(UUID workoutId) {
@@ -132,19 +126,32 @@ public class WorkoutService {
     public WorkoutDTO updateWorkoutExercise(UUID workoutId, ExerciseDTO exerciseDTO) {
         Workout workout = retrieveWorkout(workoutId);
 
-        boolean exerciseUpdated = false;
-        for (int i = 0; i < workout.getExercises().size(); i++) {
-            if (workout.getExercises().get(i).getExerciseId().equals(exerciseDTO.getExerciseId())) {
-                Exercise updatedExercise = exerciseMapper.toEntity(exerciseDTO);
-                updatedExercise.setWorkout(workout);
-                workout.getExercises().set(i, updatedExercise);
-                exerciseUpdated = true;
-                break;
-            }
-        }
+        Exercise existingExercise = workout.getExercises().stream().filter(
+                        exercise -> exercise.getExerciseId().equals(exerciseDTO.getExerciseId())
+                ).findFirst()
+                .orElseThrow(() -> new ResourceNotFoundException("Exercise not found in workout"));
 
-        if (!exerciseUpdated) {
-            throw new ResourceNotFoundException("Exercise not found in workout");
+        // Basic exercise update with properties excluding sets
+        Exercise tempExercise = exerciseMapper.toEntity(exerciseDTO);
+        exerciseMapper.update(existingExercise, tempExercise);
+        existingExercise.setWorkout(workout);
+
+        // Handle sets separately only if provided in the DTO
+        if (exerciseDTO.getSets() != null && !exerciseDTO.getSets().isEmpty()) {
+            // Clear existing sets while maintaining the collection instance
+            existingExercise.getSets().clear();
+
+            // Add new sets from the DTO
+            exerciseDTO.getSets().forEach(setDTO -> {
+                ExerciseSet set = new ExerciseSet();
+                set.setOrderPosition(setDTO.getOrderPosition());
+                set.setReps(setDTO.getReps());
+                set.setWeight(setDTO.getWeight());
+                set.setRestTimeSeconds(setDTO.getRestTimeSeconds());
+                set.setType(setDTO.getType());
+                set.setExercise(existingExercise); // Set parent reference
+                existingExercise.getSets().add(set); // Add to the collection
+            });
         }
 
         Workout savedWorkout = workoutRepository.save(workout);
@@ -155,23 +162,18 @@ public class WorkoutService {
         Workout workout = retrieveWorkout(workoutId);
 
         boolean removed = workout.getExercises().removeIf(e -> e.getExerciseId().equals(exerciseId));
-
-        if (!removed) {
-            throw new ResourceNotFoundException("Exercise not found in workout");
-        }
+        log.info("Removed value {}", removed);
+        exerciseService.deleteById(exerciseId);
 
         Workout savedWorkout = workoutRepository.save(workout);
         return workoutMapper.toDTO(savedWorkout);
     }
-
 
     public List<WorkoutDTO> findAllByUserId(UUID userId) {
         return workoutRepository.findByUser_UserId(userId).stream()
                 .map(workoutMapper::toDTO)
                 .collect(Collectors.toList());
     }
-
-
 
     public void verifyOwnership(UUID workoutId, UUID userId) {
         Workout workout = workoutRepository.findById(workoutId)
@@ -189,6 +191,13 @@ public class WorkoutService {
                 .filter(e -> e.getExerciseId().equals(exerciseId))
                 .findFirst()
                 .orElseThrow(() -> new ResourceNotFoundException("Exercise not found in workout"));
+
+        log.info("Exercise is null ? {}", exercise == null);
+        log.info("Exercise: {}", exercise.getExerciseId());
+        log.info("Exercise Sets: {}", exercise.getSets());
+        log.info("Exercise Sets after Mapper: {}", exercise.getSets().stream()
+                .map(exerciseSetMapper::toDTO)
+                .collect(Collectors.toList()));
 
         return exercise.getSets().stream()
                 .map(exerciseSetMapper::toDTO)
@@ -214,7 +223,6 @@ public class WorkoutService {
 
         exerciseService.removeSetByOrderPosition(exerciseId, orderPosition);
 
-        // Re-fetch the updated workout
         Workout updatedWorkout = retrieveWorkout(workoutId);
 
         return workoutMapper.toDTO(updatedWorkout);
